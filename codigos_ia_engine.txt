@@ -1,0 +1,2009 @@
+
+############################################################
+# ARCHIVO: ia-engine/app/__init__.py
+############################################################
+
+
+
+
+############################################################
+# ARCHIVO: ia-engine/app/main.py
+############################################################
+
+"""Punto de entrada del microservicio Email Studio IA Engine (FastAPI)."""
+
+from fastapi import FastAPI
+
+from app.routers.generate import router as generate_router
+from app.routers.meta import router as meta_router
+
+app = FastAPI(
+    title="Email Studio IA Engine",
+    version="0.1.0",
+    description="Microservicio de IA para generación de contenidos de Email Studio.",
+)
+
+
+@app.get("/health", tags=["health"])
+def health_check() -> dict:
+    """Endpoint simple de healthcheck para monitoreo."""
+    return {"status": "ok"}
+
+
+# Rutas principales del motor IA
+# /ia/generate  → generación de sets de contenido (antes “trios”)
+app.include_router(generate_router, prefix="/ia", tags=["ia"])
+
+# /ia/meta      → catálogo de campañas / clusters para el frontend/backend
+app.include_router(meta_router, prefix="/ia", tags=["meta"])
+
+
+
+############################################################
+# ARCHIVO: ia-engine/app/routers/generate.py
+############################################################
+
+# ia-engine/app/routers/generate.py
+"""Rutas principales del motor de IA (generación de contenidos)."""
+
+from fastapi import APIRouter, HTTPException
+
+from app.models.request import GenerateRequest
+from app.models.response import GenerateResponse
+from app.services.text_engine import generate_sets
+
+router: APIRouter = APIRouter()
+
+
+@router.post("/generate", response_model=GenerateResponse)
+def generate_content(payload: GenerateRequest) -> GenerateResponse:
+    """
+    Endpoint principal del motor de IA.
+
+    - Recibe: engine, campaign, cluster, sets, feedback.
+    - Devuelve: una lista de sets de contenido:
+        {subject, preheader, body.{title, subtitle, content}, cta}
+    """
+    try:
+        variants = generate_sets(payload)
+    except Exception as e:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return GenerateResponse(
+        engine=payload.engine,
+        variants=variants,
+        metadata={
+            "message": "IA Engine OK (OpenAI)",
+            "sets": len(variants),
+        },
+    )
+
+
+__all__ = ["router"]
+
+
+
+############################################################
+# ARCHIVO: ia-engine/app/routers/__init__.py
+############################################################
+
+
+
+
+############################################################
+# ARCHIVO: ia-engine/app/routers/meta.py
+############################################################
+
+# ia-engine/app/routers/meta.py
+"""Catálogo / meta del IA Engine.
+
+Este endpoint entrega:
+- Lista de campañas válidas.
+- Lista de clusters válidos.
+- Mapeo campaña → clusters permitidos.
+- Cualquier otra metadata que el frontend/backend usen
+  para poblar dropdowns sin hardcodear catálogos.
+"""
+
+from fastapi import APIRouter
+
+from app.utils.meta import get_meta
+
+# El prefix "/ia" lo aplica main.py al incluir el router.
+router = APIRouter(tags=["meta"])
+
+
+@router.get("/meta")
+def read_meta():
+    """
+    Devuelve meta estática (catálogo) del motor de IA.
+
+    Pensado para que:
+      - El backend Node no tenga que hardcodear campañas/clusters.
+      - El frontend (Email Studio) pueda poblar selectores dinámicamente.
+    """
+    return get_meta()
+
+
+__all__ = ["router"]
+
+
+
+############################################################
+# ARCHIVO: ia-engine/app/utils/clusters.py
+############################################################
+
+# ia-engine/app/utils/clusters.py
+"""Definiciones de clusters (drivers) para Banco BICE.
+
+Estas descripciones se usan para contextualizar al modelo según el driver/cluster
+seleccionado en Email Studio.
+
+IMPORTANTE:
+- Las keys de CLUSTERS deben coincidir con backend/src/utils/constants.ts::CLUSTERS.
+- CAMPAIGN_CLUSTERS debe reflejar backend/src/utils/constants.ts::CAMPAIGN_CLUSTERS.
+"""
+
+from typing import Dict, List, Optional
+
+from app.utils.campaigns import normalize_campaign
+
+# Descripción base por cluster (independiente de campaña).
+# Importante: los nombres deben coincidir con backend/src/utils/constants.ts::CLUSTERS
+CLUSTERS: Dict[str, str] = {
+    # Crédito de consumo - Persona
+    "Auto familiar": (
+        "Clientes que están evaluando cambiar o comprar un auto para uso familiar. "
+        "Valoran seguridad, espacio, comodidad y confiabilidad en el vehículo, "
+        "buscando proteger y facilitar la vida diaria de su grupo familiar."
+    ),
+    "Auto soltero": (
+        "Clientes solteros que quieren cambiar o comprar un auto para uso personal. "
+        "Buscan estilo, independencia y libertad de movimiento, sin exceso de estridencia, "
+        "manteniendo un tono aspiracional pero sobrio."
+    ),
+    "Cambio de moto": (
+        "Clientes que actualmente usan moto y están evaluando renovarla o cambiarla. "
+        "Valoran movilidad ágil, economía en combustible y mejoras de seguridad y tecnología."
+    ),
+    "Mejora del hogar": (
+        "Clientes que desean remodelar, ampliar o mejorar su vivienda actual. "
+        "Buscan más confort, mejor distribución o valorizar la propiedad, "
+        "con foco en proyectos concretos (cocina, terraza, home office, etc.)."
+    ),
+    "Proyectos familiares": (
+        "Clientes que evalúan tomar un crédito para proyectos asociados a la familia: "
+        "educación, salud, cambios de vivienda, experiencias compartidas, entre otros."
+    ),
+    "Proyectos personales": (
+        "Clientes que planean usar el crédito para metas individuales: estudios, postgrados, "
+        "cursos, emprendimientos personales, hobbies o cambios de estilo de vida."
+    ),
+    "Reorganizar finanzas joven": (
+        "Clientes de perfil más joven, con varias deudas o productos de crédito activos, "
+        "que necesitan ordenar pagos, consolidar y bajar su carga mensual."
+    ),
+    "Reorganizar finanzas senior": (
+        "Clientes de mayor edad con deudas dispersas o estructuras de pago complejas, "
+        "que buscan simplificar, ganar estabilidad y planificar mejor su flujo de caja."
+    ),
+    "Viajes familiares": (
+        "Clientes que planifican viajes en familia, dentro o fuera de Chile. "
+        "Valoran seguridad, anticipación, comodidad y poder financiar parte del viaje "
+        "sin desordenar completamente sus finanzas."
+    ),
+    "Viajes solteros": (
+        "Clientes que planifican viajes individuales o con amistades, normalmente con destinos "
+        "más juveniles o experiencias intensas. Buscan flexibilidad y aprovechar la oportunidad "
+        "sin sobredimensionar el riesgo financiero."
+    ),
+
+    # Crédito de consumo - Empresa
+    "Capital de trabajo": (
+        "Empresas o emprendedores que requieren liquidez para gastos operativos: pago a proveedores, "
+        "sueldos, stock, entre otros. El foco está en continuidad del negocio y estabilidad de caja."
+    ),
+    "Inversión en activos": (
+        "Empresas que buscan financiar la compra o renovación de activos productivos: maquinaria, "
+        "tecnología, infraestructura o flota. El mensaje debe vincular el crédito con crecimiento "
+        "y eficiencia del negocio."
+    ),
+    "Ordenar pasivos empresa": (
+        "Empresas con varias deudas o líneas de crédito dispersas que quieren simplificar su "
+        "estructura de pasivos, mejorando plazos, tasas o visibilidad del endeudamiento."
+    ),
+    "Expansión del negocio": (
+        "Empresas que planean abrir nuevas sucursales, expandirse a nuevas ciudades/países o "
+        "incorporar nuevas líneas de negocio. El crédito se presenta como apoyo al crecimiento."
+    ),
+    "Capital para impuestos": (
+        "Empresas que necesitan liquidez puntual para cumplir obligaciones tributarias, "
+        "evitando tensiones de caja y manteniendo orden en sus finanzas."
+    ),
+
+    # DAP (Depósito a plazo)
+    "Ahorro objetivo": (
+        "Clientes que quieren reservar un monto con un objetivo concreto (viaje, estudio, "
+        "proyecto futuro), usando un instrumento conservador y de plazo definido."
+    ),
+    "Fondo de emergencia": (
+        "Clientes que buscan constituir o reforzar un fondo de emergencia, priorizando liquidez "
+        "y seguridad por sobre retornos extremos."
+    ),
+    "Inversión conservadora": (
+        "Clientes con perfil más conservador o parte de un portafolio donde se desea estabilidad, "
+        "priorizando preservación de capital y retornos predecibles."
+    ),
+    "Plan de corto plazo": (
+        "Clientes que desean invertir excedentes por unos meses, manteniendo visibilidad del retorno "
+        "y fecha de vencimiento del depósito."
+    ),
+    "Plan de largo plazo": (
+        "Clientes con horizonte de varios años, que prefieren definir plazos más largos para "
+        "aprovechar mejores condiciones o mayor disciplina de ahorro."
+    ),
+
+    # Crédito hipotecario
+    "Primera vivienda": (
+        "Clientes que buscan financiar su primera vivienda, combinando logro personal con estabilidad "
+        "de largo plazo. El tono debe ser aspiracional pero responsable."
+    ),
+    "Mejora de vivienda actual": (
+        "Clientes que quieren cambiarse a una vivienda mejor ubicada, más amplia o de mejor estándar, "
+        "manteniendo orden en su carga financiera."
+    ),
+    "Inversión inmobiliaria": (
+        "Clientes que buscan adquirir una propiedad como inversión, pensando en arriendo, plusvalía "
+        "y expansión de su patrimonio."
+    ),
+    "Refinanciar hipotecario": (
+        "Clientes que ya tienen un crédito hipotecario y quieren evaluar condiciones mejores "
+        "en tasa, plazo o estructura de pagos."
+    ),
+
+    # Refinanciar deuda
+    "Consolidar deudas consumo": (
+        "Clientes con varios créditos de consumo o préstamos dispersos que necesitan unificarlos "
+        "en una estructura más simple, con una o pocas cuotas."
+    ),
+    "Bajar dividendo hipotecario": (
+        "Clientes que buscan revisar su crédito hipotecario actual para bajar la cuota mensual, "
+        "entendiendo el impacto en plazo y costo total."
+    ),
+    "Reorganizar tarjetas de crédito": (
+        "Clientes con múltiples tarjetas o saldos altos, que necesitan orden, menor carga de interés "
+        "y una estructura de pago más clara."
+    ),
+    "Ordenar líneas y sobregiros": (
+        "Clientes que usan líneas de crédito y sobregiros como financiamiento permanente y buscan "
+        "reemplazarlo por una deuda más ordenada y estructurada."
+    ),
+
+    # Apertura producto - Cuenta corriente
+    "Cuenta sueldo": (
+        "Clientes que quieren recibir su sueldo en Banco BICE para ordenar mejor sus finanzas "
+        "and acceder a beneficios asociados."
+    ),
+    "Cuenta para PyME": (
+        "Empresas o emprendedores que necesitan una cuenta para operar el día a día: pagos, recaudación "
+        "y relación con proveedores, con soporte especializado."
+    ),
+    "Cuenta alta renta": (
+        "Clientes de renta alta que buscan una relación bancaria con servicio más personalizado, "
+        "acceso a productos avanzados e integración con inversión y crédito."
+    ),
+    "Cuenta para profesional independiente": (
+        "Profesionales independientes que necesitan separar finanzas personales y del negocio, "
+        "ordenar ingresos variables y mejorar su estructura de pagos."
+    ),
+
+    # Apertura producto - Tarjeta de crédito
+    "Viajes internacionales": (
+        "Clientes que viajan fuera de Chile y valoran seguridad, beneficios en viajes y flexibilidad "
+        "para compras en el extranjero."
+    ),
+    "Compras diarias": (
+        "Clientes que usan la tarjeta en su gasto cotidiano y necesitan visibilidad y control "
+        "del presupuesto mensual."
+    ),
+    "Compras online": (
+        "Clientes que compran frecuentemente por canales digitales y valoran seguridad, "
+        "beneficios y experiencia fluida en e-commerce."
+    ),
+    "Segmento alta renta": (
+        "Clientes de alto ingreso que buscan beneficios superiores, mejor servicio y una experiencia "
+        "de tarjeta alineada a su estilo de vida."
+    ),
+
+    # Seguros
+    "Seguro de auto": (
+        "Clientes que quieren proteger su vehículo, con foco en asistencia en ruta, reparación y "
+        "tranquilidad frente a siniestros."
+    ),
+    "Seguro de vida": (
+        "Clientes que buscan proteger a su familia ante eventos graves, garantizando respaldo económico "
+        "en momentos complejos."
+    ),
+    "Seguro de hogar": (
+        "Clientes que quieren proteger su vivienda y contenido del hogar ante incendios, robos o daños, "
+        "cuidando su patrimonio."
+    ),
+    "Seguro de viaje": (
+        "Clientes que viajan dentro o fuera de Chile y valoran cobertura médica, asistencia y protección "
+        "ante imprevistos en el trayecto."
+    ),
+    "Seguro de salud": (
+        "Clientes que desean complementar su cobertura actual de salud, reduciendo el impacto "
+        "económico de atenciones médicas o tratamientos."
+    ),
+}
+
+#: Mapa campaña -> lista de clusters permitidos (debe reflejar constants.ts del backend)
+CAMPAIGN_CLUSTERS: Dict[str, List[str]] = {
+    "Crédito de consumo - Persona": [
+        "Auto familiar",
+        "Auto soltero",
+        "Cambio de moto",
+        "Mejora del hogar",
+        "Proyectos familiares",
+        "Proyectos personales",
+        "Reorganizar finanzas joven",
+        "Reorganizar finanzas senior",
+        "Viajes familiares",
+        "Viajes solteros",
+    ],
+    "Crédito de consumo - Empresa": [
+        "Capital de trabajo",
+        "Inversión en activos",
+        "Ordenar pasivos empresa",
+        "Expansión del negocio",
+        "Capital para impuestos",
+    ],
+    "DAP (Depósito a plazo)": [
+        "Ahorro objetivo",
+        "Fondo de emergencia",
+        "Inversión conservadora",
+        "Plan de corto plazo",
+        "Plan de largo plazo",
+    ],
+    "Crédito hipotecario": [
+        "Primera vivienda",
+        "Mejora de vivienda actual",
+        "Inversión inmobiliaria",
+        "Refinanciar hipotecario",
+    ],
+    "Refinanciar deuda": [
+        "Consolidar deudas consumo",
+        "Bajar dividendo hipotecario",
+        "Reorganizar tarjetas de crédito",
+        "Ordenar líneas y sobregiros",
+    ],
+    "Apertura producto - Cuenta corriente": [
+        "Cuenta sueldo",
+        "Cuenta para PyME",
+        "Cuenta alta renta",
+        "Cuenta para profesional independiente",
+    ],
+    "Apertura producto - Tarjeta de crédito": [
+        "Viajes internacionales",
+        "Compras diarias",
+        "Compras online",
+        "Segmento alta renta",
+    ],
+    "Seguros": [
+        "Seguro de auto",
+        "Seguro de vida",
+        "Seguro de hogar",
+        "Seguro de viaje",
+        "Seguro de salud",
+    ],
+}
+
+#: Overrides opcionales por campaña+cluster (cuando el contexto cambia mucho)
+CAMPAIGN_CLUSTER_CONTEXT: Dict[str, Dict[str, str]] = {
+    # Ejemplos – se pueden ir afinando con el tiempo
+    "Crédito de consumo - Persona": {
+        "Auto familiar": (
+            "Presenta el crédito de consumo como una forma de renovar el auto familiar, "
+            "destacando seguridad, espacio y comodidad, sin sobreprometer beneficios."
+        ),
+        "Auto soltero": (
+            "Enfoca el crédito en renovar el auto del cliente, ligado a independencia y estilo de vida, "
+            "manteniendo un tono sobrio y responsable."
+        ),
+        "Mejora del hogar": (
+            "Plantea el crédito como herramienta para remodelar o ampliar la vivienda, "
+            "con foco en confort y valorización del inmueble."
+        ),
+        "Reorganizar finanzas joven": (
+            "Propón el crédito como forma de ordenar deudas dispersas, bajar la carga mensual "
+            "y recuperar tranquilidad, con tono empático."
+        ),
+        "Reorganizar finanzas senior": (
+            "Habla de simplificar pagos y ganar estabilidad, explicando claramente condiciones y plazos, "
+            "con lenguaje muy respetuoso."
+        ),
+    },
+    "Crédito de consumo - Empresa": {
+        "Capital de trabajo": (
+            "Enfatiza que el crédito apoya el ciclo operativo del negocio, cubriendo brechas de caja "
+            "sin desordenar la estructura financiera."
+        ),
+        "Inversión en activos": (
+            "Vincula el crédito con la renovación de equipos, tecnología o infraestructura que permitan "
+            "hacer crecer la empresa."
+        ),
+    },
+    # El resto de combinaciones usa el fallback genérico con la descripción base del cluster.
+}
+
+
+def clusters_for_campaign(campaign: str) -> list[str]:
+    """
+    Devuelve la lista de clusters válidos para una campaña dada
+    (según la misma lógica que el backend Node).
+    """
+    normalized = normalize_campaign(campaign)
+    return CAMPAIGN_CLUSTERS.get(normalized, [])
+
+
+def describe_cluster(cluster: str, campaign: Optional[str] = None) -> str:
+    """
+    Devuelve una descripción amigable del cluster.
+    Si se entrega campaña, intenta contextualizar el mensaje a ese producto.
+    """
+    base = CLUSTERS.get(cluster)
+    normalized_campaign: Optional[str] = (
+        normalize_campaign(campaign) if campaign else None
+    )
+
+    # 1) Contexto específico campaña+cluster (si existe override)
+    if normalized_campaign:
+        override = CAMPAIGN_CLUSTER_CONTEXT.get(
+            normalized_campaign, {}
+        ).get(cluster)
+        if override:
+            return override
+
+    # 2) Descripción base + instrucción genérica de adaptación al producto
+    if base and normalized_campaign:
+        return (
+            f"{base} En el contexto de la campaña '{normalized_campaign}', "
+            "explica cómo este producto ayuda específicamente a este segmento, "
+            "con foco en beneficios concretos, lenguaje claro y tono Banco BICE."
+        )
+
+    # 3) Solo descripción base del cluster
+    if base:
+        return base
+
+    # 4) Fallback total
+    if normalized_campaign:
+        return (
+            f"Segmento de clientes identificado como '{cluster}' para la campaña "
+            f"'{normalized_campaign}'. Ajusta el mensaje a su contexto, necesidades "
+            "financieras y etapa de vida."
+        )
+
+    return (
+        f"Segmento de clientes identificado como '{cluster}'. "
+        "Ajusta el mensaje a su contexto, necesidades financieras y etapa de vida."
+    )
+
+
+
+############################################################
+# ARCHIVO: ia-engine/app/utils/validators.py
+############################################################
+
+# ia-engine/app/utils/validators.py
+"""Utilidades de validación y normalización para el IA Engine.
+
+Se encargan de:
+- Normalizar nombres de campañas (aliases).
+- Verificar si campaña / cluster existen en el catálogo oficial.
+- Verificar combinaciones campaña–cluster coherentes.
+
+IMPORTANTE: mantener alineado con:
+- backend/src/utils/constants.ts (CAMPAIGNS, CLUSTERS, CAMPAIGN_CLUSTERS)
+- app.utils.campaigns.py
+- app.utils.clusters.py
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Dict, List, Tuple
+
+from app.utils.campaigns import CAMPAIGNS_TONE, CAMPAIGN_ALIASES
+from app.utils.clusters import (
+    CLUSTERS as CLUSTERS_DEF,
+    CAMPAIGN_CLUSTERS as CAMPAIGN_CLUSTERS_MAP,
+)
+
+logger = logging.getLogger(__name__)
+
+# Conjuntos base (nombres canónicos)
+ALL_CAMPAIGNS = set(CAMPAIGNS_TONE.keys())
+ALL_CLUSTERS = set(CLUSTERS_DEF.keys())
+
+# ============================================================
+#  Mapa campaña → clusters válidos (canónico)
+#  Se toma directamente desde app.utils.clusters.CAMPAIGN_CLUSTERS
+# ============================================================
+
+CAMPAIGN_CLUSTERS: Dict[str, List[str]] = CAMPAIGN_CLUSTERS_MAP
+
+
+# ============================================================
+#  Helpers de normalización / validación
+# ============================================================
+
+def normalize_campaign_name(name: str) -> str:
+    """Aplica alias y limpia espacios a un nombre de campaña."""
+    if not isinstance(name, str):
+        return ""
+    cleaned = name.strip()
+    return CAMPAIGN_ALIASES.get(cleaned, cleaned)
+
+
+def is_known_campaign(name: str) -> bool:
+    """True si la campaña (normalizada) existe en el catálogo."""
+    normalized = normalize_campaign_name(name)
+    return normalized in ALL_CAMPAIGNS
+
+
+def is_known_cluster(name: str) -> bool:
+    """True si el cluster existe en el catálogo canónico."""
+    if not isinstance(name, str):
+        return False
+    return name in ALL_CLUSTERS
+
+
+def allowed_clusters_for_campaign(campaign: str) -> List[str]:
+    """Clusters configurados para una campaña (después de normalizar alias)."""
+    normalized = normalize_campaign_name(campaign)
+    return CAMPAIGN_CLUSTERS.get(normalized, [])
+
+
+def soft_validate_campaign_cluster(
+    campaign: str,
+    cluster: str,
+) -> Tuple[str, str]:
+    """
+    Normaliza campaña, verifica catálogo y coherencia con el mapa campaña–cluster.
+
+    NO lanza excepciones; solo:
+    - Normaliza el nombre de campaña usando CAMPAIGN_ALIASES.
+    - Emite warnings si algo está fuera de catálogo o combinación incoherente.
+
+    Devuelve:
+        (campaign_normalizada, cluster_original)
+    """
+    normalized_campaign = normalize_campaign_name(campaign)
+
+    if normalized_campaign not in ALL_CAMPAIGNS:
+        logger.warning(
+            "IA-Engine: campaign fuera de catálogo: %r (normalizada=%r)",
+            campaign,
+            normalized_campaign,
+        )
+
+    if not is_known_cluster(cluster):
+        logger.warning(
+            "IA-Engine: cluster fuera de catálogo: %r",
+            cluster,
+        )
+    else:
+        allowed = CAMPAIGN_CLUSTERS.get(normalized_campaign)
+        if allowed and cluster not in allowed:
+            logger.warning(
+                "IA-Engine: cluster %r no está configurado para campaign %r (allowed=%s)",
+                cluster,
+                normalized_campaign,
+                allowed,
+            )
+
+    return normalized_campaign, cluster
+
+
+def strict_validate_campaign_cluster(campaign: str, cluster: str) -> Tuple[str, str]:
+    """
+    Versión estricta: lanza ValueError si algo está fuera de catálogo
+    o la combinación campaña–cluster no está configurada.
+
+    Pensado para tests o validaciones offline, no para runtime crítico.
+    """
+    normalized_campaign = normalize_campaign_name(campaign)
+
+    if normalized_campaign not in ALL_CAMPAIGNS:
+        raise ValueError(
+            f"campaign desconocida: {campaign!r} (normalizada={normalized_campaign!r})"
+        )
+
+    if not is_known_cluster(cluster):
+        raise ValueError(f"cluster desconocido: {cluster!r}")
+
+    allowed = CAMPAIGN_CLUSTERS.get(normalized_campaign, [])
+    if allowed and cluster not in allowed:
+        raise ValueError(
+            f"cluster {cluster!r} no está configurado para campaign {normalized_campaign!r}. "
+            f"Clusters permitidos: {allowed}"
+        )
+
+    return normalized_campaign, cluster
+
+
+__all__ = [
+    "CAMPAIGN_CLUSTERS",
+    "ALL_CAMPAIGNS",
+    "ALL_CLUSTERS",
+    "normalize_campaign_name",
+    "is_known_campaign",
+    "is_known_cluster",
+    "allowed_clusters_for_campaign",
+    "soft_validate_campaign_cluster",
+    "strict_validate_campaign_cluster",
+]
+
+
+
+############################################################
+# ARCHIVO: ia-engine/app/utils/copy_meta.py
+############################################################
+
+# ia-engine/app/utils/copy_meta.py
+"""
+Catálogo de copy para campañas y clusters del IA Engine.
+
+Centraliza:
+- BENEFITS: beneficios por campaña canónica.
+- CTAS: llamados a la acción por campaña canónica.
+- SUBJECTS: ejemplos de asuntos por campaña canónica.
+- CLUSTER_TONE: indicaciones de tono por cluster canónico.
+
+IMPORTANTE:
+- Las keys de campaña DEBEN alinearse con los nombres canónicos
+  de `CAMPAIGNS_TONE` (app.utils.campaigns).
+- Las keys de cluster DEBEN alinearse con `CLUSTERS` (app.utils.clusters).
+"""
+
+from typing import Any, Dict, List
+
+
+# ============================================================
+#  Beneficios por campaña (keys canónicas)
+# ============================================================
+
+BENEFITS: Dict[str, List[str]] = {
+    "Crédito de consumo - Persona": [
+        # Antes: "Crédito de Consumo BICE"
+        "tasa competitiva para clientes Banco BICE",
+        "cuotas y plazos flexibles según tu ingreso",
+        "proceso 100% online y sin papeleo excesivo",
+        "abono rápido del dinero en tu cuenta corriente",
+        "posibilidad de prepago parcial o total según condiciones vigentes",
+        # Antes: "Aumento línea de crédito"
+        "mayor flexibilidad para manejar imprevistos en el mes",
+        "alternativa para ordenar gastos de corto plazo",
+        "complemento a otros productos de financiamiento",
+    ],
+    "Crédito de consumo - Empresa": [
+        "liquidez para gastos operativos y capital de trabajo",
+        "opción de financiar activos productivos y tecnología",
+        "plazos y montos ajustables según el flujo del negocio",
+        "evaluación especializada para empresas y emprendedores",
+    ],
+    "DAP (Depósito a plazo)": [
+        # Antes: "DAP (Depósito a Plazo)"
+        "tasa fija conocida desde el inicio",
+        "plazos según tu horizonte de inversión",
+        "producto conservador y de bajo riesgo",
+        "renovación simple desde canales digitales",
+        # Guiño conservador para complementar un portafolio
+        "puede complementar otras alternativas de inversión como parte conservadora de tu portafolio",
+    ],
+    "Crédito hipotecario": [
+        "tasas competitivas para clientes Banco BICE",
+        "financiamiento para primera vivienda o inversión",
+        "plazos largos para ordenar tu dividendo",
+        "asesoría especializada en cada etapa de la compra",
+        "opciones de portabilidad y refinanciamiento",
+    ],
+    "Refinanciar deuda": [
+        # Antes: "Consolidación de deudas" + "Ordena tus deudas"
+        "posibilidad de bajar la cuota mensual total",
+        "unificar deudas en menos productos para simplificar el pago",
+        "ordenar el flujo de caja mes a mes",
+        "ajustar el plazo a tu capacidad de pago",
+        "acompañamiento para entender el nuevo esquema de pagos",
+        "unificar varios compromisos en una estructura más clara",
+        "reordenar plazos y montos para aliviar la carga mensual",
+        "tener una fecha de pago más predecible",
+        "reducir la probabilidad de atrasos y recargos",
+    ],
+    "Apertura producto - Tarjeta de crédito": [
+        # Antes: "Tarjeta de crédito"
+        "beneficios en comercios y programas de puntos",
+        "compras en cuotas en Chile y el extranjero",
+        "seguro asociado según producto contratado",
+        "gestión 100% digital de la tarjeta",
+        "herramientas para seguir y ordenar tus gastos",
+        # Antes: "Aumento cupo TC"
+        "mayor holgura para compras grandes o viajes",
+        "posibilidad de concentrar gastos en una tarjeta",
+        "acceso a más beneficios asociados a tu tarjeta",
+    ],
+    "Apertura producto - Cuenta corriente": [
+        # Antes: "Cuenta corriente PyME" (adaptado a uso general)
+        "medios de pago para el día a día",
+        "acceso a canales digitales y servicios de recaudación",
+        "posibilidad de complementar con líneas de crédito y otros productos",
+        "facilita ordenar ingresos y gastos en una sola cuenta",
+    ],
+    "Seguros": [
+        # Antes: "Seguros"
+        "protección frente a eventos imprevistos",
+        "coberturas ajustables según tu necesidad",
+        "asistencia y soporte especializado",
+        "respaldo de Banco BICE y sus aliados",
+        # Antes: "Seguros de auto"
+        "protección del vehículo frente a accidentes y robos",
+        "asistencia en ruta y servicios complementarios",
+        "distintas coberturas para adaptarse a tu uso del auto",
+        # Antes: "Seguros de vida"
+        "protección económica para tu familia ante imprevistos",
+        "opciones de cobertura según etapa de vida",
+        "posibilidad de complementar con otros seguros",
+    ],
+}
+
+
+# ============================================================
+#  CTAs por campaña (keys canónicas)
+# ============================================================
+
+CTAS: Dict[str, List[str]] = {
+    "Crédito de consumo - Persona": [
+        # Antes: "Crédito de Consumo BICE"
+        "Simular mi crédito",
+        "Ver mi oferta",
+        "Hablar con un ejecutivo",
+        # Antes: "Aumento línea de crédito"
+        "Solicitar evaluación",
+        "Ver alternativas",
+    ],
+    "Crédito de consumo - Empresa": [
+        "Solicitar evaluación para mi empresa",
+        "Hablar con un ejecutivo",
+        "Conocer alternativas de financiamiento",
+    ],
+    "DAP (Depósito a plazo)": [
+        # Antes: "DAP (Depósito a Plazo)"
+        "Simular mi depósito",
+        "Ver tasas vigentes",
+        "Abrir depósito a plazo",
+        # Antes: "Fondos mutuos / Inversión" (adaptado)
+        "Conocer alternativas de inversión",
+    ],
+    "Crédito hipotecario": [
+        "Simular mi dividendo",
+        "Pedir asesoría hipotecaria",
+        "Conocer mi oferta",
+    ],
+    "Refinanciar deuda": [
+        # Antes: "Consolidación de deudas" + "Ordena tus deudas"
+        "Evaluar mi consolidación",
+        "Simular nueva cuota",
+        "Hablar con un ejecutivo",
+        "Ordenar mis deudas",
+        "Simular nueva estructura",
+        "Solicitar asesoría",
+    ],
+    "Apertura producto - Tarjeta de crédito": [
+        # Antes: "Tarjeta de crédito"
+        "Solicitar tarjeta",
+        "Conocer beneficios",
+        "Ver requisitos",
+        # Antes: "Aumento cupo TC"
+        "Pedir aumento de cupo",
+        "Evaluar mi tarjeta",
+    ],
+    "Apertura producto - Cuenta corriente": [
+        # Antes: "Cuenta corriente PyME"
+        "Abrir cuenta corriente",
+        "Conocer requisitos",
+        "Agendar llamada",
+    ],
+    "Seguros": [
+        # Antes: "Seguros"
+        "Cotizar seguro",
+        "Conocer coberturas",
+        "Hablar con ejecutivo",
+        # Antes: "Seguros de auto"
+        "Cotizar seguro de auto",
+        # Antes: "Seguros de vida"
+        "Cotizar seguro de vida",
+        "Calcular prima",
+        "Hablar con asesor",
+    ],
+}
+
+
+# ============================================================
+#  Subjects de referencia por campaña (keys canónicas)
+# ============================================================
+
+SUBJECTS: Dict[str, List[str]] = {
+    "Crédito de consumo - Persona": [
+        # Antes: "Crédito de Consumo BICE"
+        "Tu próximo proyecto, con un crédito a tu medida",
+        "Financia lo que necesitas con el Crédito de Consumo BICE",
+        "Haz realidad tus planes con cuotas claras y tasa competitiva",
+        "Tu crédito 100% online, en pocos pasos",
+        "Da el siguiente paso con un crédito pensado para ti",
+        # Antes: "Aumento línea de crédito"
+        "Evalúa aumentar tu línea de crédito",
+        "Más flexibilidad para tu día a día",
+        "Revisa alternativas para manejar tus imprevistos",
+    ],
+    "Crédito de consumo - Empresa": [
+        "Financiamiento para las necesidades de tu empresa",
+        "Evalúa un crédito para el día a día de tu negocio",
+        "Haz crecer tu empresa con apoyo financiero BICE",
+    ],
+    "DAP (Depósito a plazo)": [
+        # Antes: "DAP (Depósito a Plazo)" + "Fondos mutuos / Inversión" (adaptado)
+        "Haz que tu ahorro trabaje con una tasa conocida",
+        "Evalúa un Depósito a Plazo para tus excedentes",
+        "Una alternativa conservadora para tu dinero",
+        "Da el siguiente paso en tus inversiones",
+        "Evalúa alternativas de inversión con Banco BICE",
+        "Diversifica tu ahorro con una solución conservadora",
+    ],
+    "Crédito hipotecario": [
+        "Da el siguiente paso hacia tu nueva vivienda",
+        "Evalúa tu crédito hipotecario con Banco BICE",
+        "Tu próxima propiedad, con asesoría especializada",
+    ],
+    "Refinanciar deuda": [
+        # Antes: "Consolidación de deudas" + "Ordena tus deudas"
+        "Evalúa unificar tus deudas en una sola cuota",
+        "Menos estrés: una cuota, mejores condiciones",
+        "Ordena tus deudas y alivia tu mes",
+        "Revisa si puedes mejorar tu carga financiera",
+        "Es momento de ordenar tus deudas",
+        "Revisa una forma más simple de pagar mes a mes",
+        "Un solo plan de pago para tus deudas actuales",
+        "Evalúa un nuevo esquema de cuotas para tu tranquilidad",
+    ],
+    "Apertura producto - Tarjeta de crédito": [
+        # Antes: "Tarjeta de crédito" + "Aumento cupo TC"
+        "Conoce los beneficios de tu tarjeta BICE",
+        "Evalúa una tarjeta pensada para tu estilo de vida",
+        "Organiza tus compras con una tarjeta a tu medida",
+        "Evalúa aumentar el cupo de tu tarjeta",
+        "Más espacio para tus planes con tu tarjeta BICE",
+        "Revisa si puedes ampliar tu cupo hoy",
+    ],
+    "Apertura producto - Cuenta corriente": [
+        # Antes: "Cuenta corriente PyME" (adaptado)
+        "Ordena tus finanzas con una cuenta corriente en Banco BICE",
+        "Evalúa una cuenta pensada para tu día a día",
+        "Soluciones bancarias para tu actividad financiera",
+    ],
+    "Seguros": [
+        # Antes: "Seguros" + "Seguros de auto" + "Seguros de vida"
+        "Revisa cómo proteger lo que más valoras",
+        "Evalúa tus coberturas de seguros con Banco BICE",
+        "Protección y tranquilidad para ti y tu familia",
+        "Protege tu auto con un seguro a tu medida",
+        "Evalúa un seguro para tu vehículo",
+        "Más tranquilidad cada vez que manejes",
+        "Piensa hoy en la protección de tu familia",
+        "Evalúa un seguro de vida según tu etapa",
+        "Un plan de protección pensado para quienes más quieres",
+    ],
+}
+
+
+# ============================================================
+#  Tono por cluster (canon: CLUSTERS de app.utils.clusters)
+# ============================================================
+
+CLUSTER_TONE: Dict[str, str] = {
+    # Clusters de Crédito de consumo - Persona
+    "Auto familiar": (
+        "Destaca seguridad, comodidad y espacio para la familia al renovar el auto."
+    ),
+    "Auto soltero": (
+        "Tono aspiracional; enfócate en estilo de vida, independencia y libertad."
+    ),
+    "Cambio de moto": (
+        "Resalta movilidad ágil, economía y mejora respecto al vehículo actual."
+    ),
+    "Mejora del hogar": (
+        "Conecta con ideas de renovación, confort y valorización de la vivienda."
+    ),
+    "Proyectos familiares": (
+        "Enfoca en bienestar del grupo familiar, estudios, salud y experiencias compartidas."
+    ),
+    "Proyectos personales": (
+        "Habla de desarrollo personal, estudios, hobbies y cambios de vida."
+    ),
+    "Reorganizar finanzas joven": (
+        "Tono empático y sin juicio; foco en alivio de carga mensual y orden financiero."
+    ),
+    "Reorganizar finanzas senior": (
+        "Tono claro y respetuoso; prioriza estabilidad, simplicidad y tranquilidad."
+    ),
+    "Viajes familiares": (
+        "Invita a vivir experiencias en familia, planificar con anticipación y viajar tranquilos."
+    ),
+    "Viajes solteros": (
+        "Tono más lúdico y motivador; habla de destinos, experiencias intensas y flexibilidad."
+    ),
+}
+
+
+# ============================================================
+#  Helper de export
+# ============================================================
+
+def get_copy_meta() -> Dict[str, Any]:
+    """
+    Devuelve un diccionario con los catálogos de copy.
+
+    Estructura:
+        {
+          "benefits": { campaign: [..] },
+          "ctas": { campaign: [..] },
+          "subjects": { campaign: [..] },
+          "clusterTone": { cluster: "..." }
+        }
+    """
+    return {
+        "benefits": BENEFITS,
+        "ctas": CTAS,
+        "subjects": SUBJECTS,
+        "clusterTone": CLUSTER_TONE,
+    }
+
+
+__all__ = ["BENEFITS", "CTAS", "SUBJECTS", "CLUSTER_TONE", "get_copy_meta"]
+
+
+
+############################################################
+# ARCHIVO: ia-engine/app/utils/__init__.py
+############################################################
+
+
+
+
+############################################################
+# ARCHIVO: ia-engine/app/utils/campaigns.py
+############################################################
+
+# ia-engine/app/utils/campaigns.py
+"""Utilidades para campañas (productos) Banco BICE.
+
+Define:
+- Nombre canónico de campañas.
+- Descripción de tono/posicionamiento.
+- Aliases para compatibilidad con nombres antiguos.
+
+IMPORTANTE:
+- Las keys de CAMPAIGNS_TONE deben coincidir con:
+    backend/src/utils/constants.ts::CAMPAIGNS
+- El frontend y el backend deben usar estos nombres canónicos.
+"""
+
+from typing import Dict, List
+
+# Nombre canónico de campañas + descripción de tono/posicionamiento
+CAMPAIGNS_TONE: Dict[str, str] = {
+    "Crédito de consumo - Persona": (
+        "Crédito de consumo flexible orientado a financiar proyectos personales o familiares, "
+        "con foco en claridad de cuotas, tasa competitiva y un proceso 100% online. "
+        "Apunta a clientes que valoran un servicio sobrio, confiable y alineado con Banco BICE."
+    ),
+    "Crédito de consumo - Empresa": (
+        "Crédito de consumo para empresas y emprendedores, pensado para capital de trabajo, "
+        "inversión en activos o necesidades puntuales de liquidez. Enfatiza orden financiero y "
+        "continuidad del negocio, con evaluación especializada."
+    ),
+    "DAP (Depósito a plazo)": (
+        "Depósito a plazo para clientes que buscan una alternativa conservadora, con tasa fija "
+        "conocida desde el inicio y plazos acordes a su objetivo de ahorro o inversión. "
+        "Tono prudente, claro y orientado a preservación de capital."
+    ),
+    "Crédito hipotecario": (
+        "Crédito hipotecario para primera vivienda, mejora de vivienda o inversión inmobiliaria. "
+        "Enfatiza estabilidad, planificación de largo plazo y asesoría especializada, "
+        "manteniendo el estilo sobrio propio de Banco BICE."
+    ),
+    "Refinanciar deuda": (
+        "Oferta orientada a revisar y reestructurar deudas existentes, ya sea de consumo, "
+        "tarjetas o hipotecarias, buscando mejorar condiciones, orden y flujo de caja mensual. "
+        "El tono debe ser empático, sin juicio y muy claro en implicancias."
+    ),
+    "Apertura producto - Cuenta corriente": (
+        "Apertura de cuenta corriente para personas o empresas que buscan un banco confiable, "
+        "con buenos canales digitales, medios de pago y acceso a productos de inversión y crédito. "
+        "Foco en orden, experiencia de servicio y relación de largo plazo."
+    ),
+    "Apertura producto - Tarjeta de crédito": (
+        "Tarjeta de crédito asociada a beneficios, programas de puntos y compras en cuotas, "
+        "con foco en uso responsable, visibilidad del gasto y experiencia fluida tanto en Chile "
+        "como en el extranjero."
+    ),
+    "Seguros": (
+        "Oferta de seguros (auto, vida, hogar, viaje, salud) vinculada a la protección del cliente "
+        "y su familia, con coberturas claras y respaldo de Banco BICE y sus aliados. "
+        "El tono debe ser empático, transparente y centrado en tranquilidad."
+    ),
+}
+
+# Alias para compatibilidad con payloads antiguos
+CAMPAIGN_ALIASES: Dict[str, str] = {
+    # Nombres antiguos de campañas de consumo
+    "Crédito de Consumo BICE": "Crédito de consumo - Persona",
+    "Consolidación de deudas": "Refinanciar deuda",
+    "Ordena tus deudas": "Refinanciar deuda",
+    # Productos que ahora son subcasos
+    "Tarjeta de crédito": "Apertura producto - Tarjeta de crédito",
+    "Cuenta corriente PyME": "Apertura producto - Cuenta corriente",
+    # Variantes de DAP / inversión
+    "DAP (Depósito a Plazo)": "DAP (Depósito a plazo)",
+    "DAP (Deposito a plazo)": "DAP (Depósito a plazo)",
+    "Fondos mutuos / Inversión": "DAP (Depósito a plazo)",
+    # Seguros específicos pasan a campaña genérica de seguros
+    "Seguros de auto": "Seguros",
+    "Seguros de vida": "Seguros",
+    # Casos de aumento/ajuste que se tratan como subuso de campañas canónicas
+    "Aumento línea de crédito": "Crédito de consumo - Persona",
+    "Aumento cupo TC": "Apertura producto - Tarjeta de crédito",
+}
+
+#: Lista canónica de campañas (útil para validaciones ligeras)
+CANONICAL_CAMPAIGNS: List[str] = list(CAMPAIGNS_TONE.keys())
+
+
+def normalize_campaign(name: str) -> str:
+    """
+    Normaliza una campaña aplicando alias conocidos.
+    """
+    if not isinstance(name, str):
+        return ""
+    cleaned = name.strip()
+    return CAMPAIGN_ALIASES.get(cleaned, cleaned)
+
+
+def describe_campaign(campaign: str) -> str:
+    """
+    Devuelve una descripción de tono/posicionamiento para la campaña dada.
+    Si no se encuentra, se genera una descripción genérica.
+    """
+    normalized = normalize_campaign(campaign)
+    base = CAMPAIGNS_TONE.get(normalized)
+    if base:
+        return base
+
+    return (
+        f"Campaña financiera del Banco BICE relacionada con '{normalized}'. "
+        "Enfócate en claridad, beneficios concretos y un llamado a la acción simple, "
+        "manteniendo un tono sobrio y profesional."
+    )
+
+
+
+############################################################
+# ARCHIVO: ia-engine/app/utils/prompts.py
+############################################################
+
+# ia-engine/app/utils/prompts.py
+"""Construcción de prompts para el motor de texto (Email Studio IA Engine).
+
+Se usa por el cliente OpenAI para generar variantes (sets de contenido) de email
+con formato JSON.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Optional, Tuple
+
+from app.models.request import EmailFeedback
+from app.utils.campaigns import describe_campaign
+from app.utils.clusters import describe_cluster
+
+# Macros similares a backend/src/services/promptKit.ts
+ES_CL = (
+    "Escribe en español de Chile, claro, profesional y cercano. "
+    "Evita regionalismos confusos y jerga excesiva."
+)
+
+SAFETY = (
+    "No inventes datos no verificables. Si algo no es seguro, usa formulaciones conservadoras. "
+    "No prometas aprobaciones definitivas; siempre habla de 'evaluación', 'oferta referencial' "
+    "o 'condiciones sujetas a análisis'."
+)
+
+DELIVERABILITY = (
+    "Evita mayúsculas sostenidas, signos de exclamación repetidos, emojis y palabras gatillantes "
+    "de spam (gratis, regalo, urgente, gana dinero, 100% gratis, etc.)."
+)
+
+LENGTHS_EMAIL = (
+    "Límites: subject 38–60 caracteres; preheader 60–110; title 22–60; subtitle 14–120; "
+    "body 160–500 palabras; CTA breve (2–4 palabras)."
+)
+
+EMAIL_STRUCTURE = (
+    "El body debe ser TEXTO PLANO (NO HTML). "
+    "Estructura sugerida del body: "
+    "1) Apertura con promesa/beneficio principal (2–3 frases). "
+    "2) Lista de 3 beneficios en viñetas con '- ' al inicio (cada bullet 4–10 palabras). "
+    "3) Cierre breve con urgencia suave y próxima acción. "
+    "No incluyas disclaimers ni políticas en el body (se agregan aparte)."
+)
+
+ROLES_EMAIL = (
+    "Roles de los campos: "
+    "- subject: gancho corto y claro para el inbox. "
+    "- preheader: complementa al subject; adelanta beneficio; NO lo repite. "
+    "- title (H1 dentro del correo): introduce un ángulo NUEVO respecto de subject. "
+    "- subtitle: profundiza o agrega beneficio adicional; NO repite preheader. "
+    "- body: desarrollo en texto plano con bullets '- '. "
+    "- cta: 2–4 palabras, imperativo suave (p. ej., 'Conoce más', 'Simula aquí')."
+)
+
+CONTRASTIVE_DEDUP = (
+    "Evita duplicar subject/preheader dentro de title/subtitle. "
+    "Si title o subtitle comparten 6+ palabras consecutivas o el mismo núcleo semántico "
+    "con subject/preheader, REESCRÍBELOS con sinónimos o un ángulo distinto. "
+    "Evita comenzar title/subtitle con las mismas 3 palabras del subject/preheader. "
+    "Piensa internamente 2–3 alternativas para title/subtitle y elige la más distinta; "
+    "NO muestres tu proceso, responde solo el JSON final."
+)
+
+TONE_CONSTRAINTS = (
+    "Usa tono profesional, claro, sin tecnicismos innecesarios; enfócate en beneficios y claridad. "
+    "Cuida que el mensaje sea consistente con la marca Banco BICE: sobrio, confiable, sin exceso de hype."
+)
+
+CREDIT_NAMING = (
+    "Cuando la campaña sea de crédito de consumo, puedes referirte al producto como: "
+    "'crédito', 'crédito de consumo', 'crédito de consumo del BICE', 'Crédito de Consumo BICE'. "
+    "Si corresponde, puedes usar el placeholder [MONTO] para montos preaprobados. "
+    "Si la campaña NO es de crédito (por ejemplo seguros, DAP u otros productos), "
+    "no uses la palabra 'crédito' y ajusta el texto al producto descrito en la campaña."
+)
+
+NEUTRALITY = (
+    "El mensaje debe ser neutro en cuanto a género (no uses 'él' o 'ella'); "
+    "trata al cliente de 'tú' y no de 'usted'."
+)
+
+JSON_FIELDS = ["subject", "preheader", "title", "subtitle", "body", "cta"]
+
+
+def _json_only_clause() -> str:
+    return (
+        "Responde SOLO con un objeto JSON válido con exactamente estas claves "
+        f"(y solo estas): {', '.join(JSON_FIELDS)}. "
+        "No uses backticks, ni explicaciones fuera del JSON, ni comentarios."
+    )
+
+
+def build_email_prompt(
+    campaign: str,
+    cluster: str,
+    feedback: Optional[EmailFeedback],
+    variant_index: int,
+) -> Tuple[str, str]:
+    """
+    Construye system + user prompt para generar UN set de contenido de email.
+
+    La salida esperada del modelo es un JSON con:
+    {subject, preheader, title, subtitle, body, cta}
+    """
+
+    campaign_desc = describe_campaign(campaign)
+    cluster_desc = describe_cluster(cluster, campaign)
+
+    system = (
+        "Eres copywriter especializado en email marketing bancario y compliance "
+        "para Banco BICE en Chile. "
+        f"{ES_CL} {SAFETY} {DELIVERABILITY} {LENGTHS_EMAIL} "
+        f"{EMAIL_STRUCTURE} {ROLES_EMAIL} {CONTRASTIVE_DEDUP} "
+        f"{TONE_CONSTRAINTS} {CREDIT_NAMING} {NEUTRALITY}"
+    )
+
+    payload = {
+        "campaign": campaign,
+        "campaign_description": campaign_desc,
+        "cluster": cluster,
+        "cluster_description": cluster_desc,
+        "variant_index": variant_index,
+        "rules": {
+            "subject_preheader": (
+                "Optimizados para inbox preview (concisos, claros, sin vender humo). "
+                "Incluye el gancho principal dentro de los primeros 50 caracteres del subject."
+            ),
+            "title_subtitle": (
+                "H1 + bajada dentro del correo; deben aportar un ángulo nuevo, "
+                "no repetir subject/preheader."
+            ),
+            "cta": (
+                "2–4 palabras, imperativo suave (p. ej., 'Conoce más', 'Simula aquí'). "
+                "Sin signos de exclamación."
+            ),
+            "formatting": (
+                "El body es TEXTO PLANO; separa párrafos con saltos de línea. "
+                "Bullets con '- '. Sin HTML, sin links. "
+                "No incluyas disclaimers legales; se agregan aparte en otra capa."
+            ),
+        },
+    }
+
+    if feedback and (feedback.subject or feedback.preheader or feedback.bodyContent or feedback.body):
+        payload["user_feedback"] = {
+            "subject_hint": feedback.subject or None,
+            "preheader_hint": feedback.preheader or None,
+            "body_hint": (feedback.bodyContent or feedback.body or None),
+            "instruction": (
+                "Refina la variante siguiendo estas pistas del usuario, "
+                "manteniendo coherencia con campaña/cluster y las reglas de entregabilidad."
+            ),
+        }
+
+    example = {
+        "subject": "Tu próximo paso financiero, en minutos",
+        "preheader": "Conoce beneficios exclusivos y comisiones preferentes",
+        "title": "Beneficios que se notan desde el primer mes",
+        "subtitle": "Acumula puntos, accede a descuentos y administra todo 100% online",
+        "body": "(texto plano con párrafos y bullets '- ')",
+        "cta": "Conoce más",
+    }
+
+    user_lines = [
+        "Escribe UNA variante de email con los campos solicitados (subject, preheader, title, subtitle, body, cta).",
+        "Contexto de campaña y cluster (JSON):",
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        "Ejemplo de estilo (NO lo copies ni lo devuelvas literalmente):",
+        json.dumps(example, ensure_ascii=False, indent=2),
+        (
+            "Asegúrate de que title/subtitle NO repitan ni parafraseen subject/preheader. "
+            "Si detectas similitud, reescribe title/subtitle con sinónimos o un ángulo nuevo antes de responder."
+        ),
+        (
+            "El body debe ser texto plano: usa saltos de línea para párrafos y '- ' para bullets. "
+            "No incluyas disclaimers, links, ni HTML."
+        ),
+        _json_only_clause(),
+    ]
+
+    user = "\n- ".join(user_lines)
+    return system, user
+
+
+
+############################################################
+# ARCHIVO: ia-engine/app/utils/meta.py
+############################################################
+
+# ia-engine/app/utils/meta.py
+from typing import Dict, Any, List
+
+from app.utils.campaigns import CAMPAIGNS_TONE
+from app.utils.clusters import CLUSTERS as CLUSTERS_DEF, CAMPAIGN_CLUSTERS
+from app.utils.copy_meta import BENEFITS, CTAS, SUBJECTS, CLUSTER_TONE
+
+
+def get_meta() -> Dict[str, Any]:
+    """
+    Devuelve el catálogo de campañas, clusters y metadatos de copy
+    que usarán backend y frontend.
+
+    - `campaigns`: nombres canónicos de campaña (keys de CAMPAIGNS_TONE).
+    - `clusters`: nombres canónicos de cluster (keys de CLUSTERS).
+    - `campaignClusters`: mapa campaña → [clusters válidos].
+    - `benefits`: beneficios sugeridos por campaña (keys canónicas).
+    - `ctas`: CTAs sugeridas por campaña (keys canónicas).
+    - `subjects`: asuntos de referencia por campaña (keys canónicas).
+    - `clusterTone`: lineamientos de tono por cluster (keys = clusters canónicos).
+
+    La compatibilidad con nombres antiguos se maneja con aliases en:
+    - app.utils.campaigns.CAMPAIGN_ALIASES
+    """
+    campaigns: List[str] = list(CAMPAIGNS_TONE.keys())
+    clusters: List[str] = list(CLUSTERS_DEF.keys())
+
+    return {
+        "campaigns": campaigns,
+        "clusters": clusters,
+        "campaignClusters": CAMPAIGN_CLUSTERS,
+        "benefits": BENEFITS,
+        "ctas": CTAS,
+        "subjects": SUBJECTS,
+        "clusterTone": CLUSTER_TONE,
+    }
+
+
+
+############################################################
+# ARCHIVO: ia-engine/app/models/request.py
+############################################################
+
+# ia-engine/app/models/request.py
+"""Modelos de request para el motor de IA de Emails V2.
+
+A nivel de negocio hablamos de *sets de contenido*:
+cada set = {subject, preheader, title, subtitle, body, cta}.
+"""
+
+from typing import Optional
+
+from pydantic import BaseModel, Field
+
+
+class EmailFeedback(BaseModel):
+    """
+    Feedback opcional desde el usuario para refinar la variante.
+
+    Estos hints vienen desde el front/backend JS y se usan para ajustar
+    el copy manteniendo coherencia con campaña/cluster.
+    """
+
+    subject: Optional[str] = Field(
+        default=None,
+        description="Hint de asunto entregado por el usuario.",
+    )
+    preheader: Optional[str] = Field(
+        default=None,
+        description="Hint de preheader entregado por el usuario.",
+    )
+    bodyContent: Optional[str] = Field(
+        default=None,
+        description="Hint de body entregado por el usuario (texto plano).",
+    )
+    body: Optional[str] = Field(
+        default=None,
+        description="Compatibilidad para payloads legacy donde venía 'body' plano.",
+    )
+
+
+class GenerateRequest(BaseModel):
+    """
+    Request para el endpoint /ia/generate.
+
+    Mapea 1:1 con lo que necesitamos desde el backend Node:
+    - engine   → nombre lógico del motor (por ahora 'openai').
+    - campaign → campaña (ej: 'Crédito de consumo - Persona').
+    - cluster  → cluster/segmento (driver_asunto).
+    - sets     → CANTIDAD DE SETS de contenido a generar.
+    - feedback → hints opcionales del usuario.
+    """
+
+    engine: str = Field(
+        default="openai",
+        description="Motor de IA a utilizar (por ahora solo 'openai').",
+    )
+
+    campaign: str = Field(
+        ...,
+        description="Campaña (ej: 'Crédito de consumo - Persona', 'DAP (Depósito a plazo)', etc.).",
+    )
+
+    cluster: str = Field(
+        ...,
+        description="Cluster/driver definido para la campaña (segmento/driver comercial).",
+    )
+
+    sets: int = Field(
+        default=1,
+        ge=1,
+        le=5,
+        description=(
+            "Cantidad de SETS de contenido a generar (1..5). "
+            "Cada set incluye subject, preheader, title, subtitle, body, cta."
+        ),
+    )
+
+    feedback: Optional[EmailFeedback] = Field(
+        default=None,
+        description="Feedback opcional del usuario (subject/preheader/bodyContent/body).",
+    )
+
+    # Helpers por si quieres usar un estilo fluido en el futuro
+
+    def with_sets(self, sets: int) -> "GenerateRequest":
+        """
+        Helper opcional para pipelines internos:
+        ajusta la cantidad de sets y devuelve self.
+        """
+        self.sets = sets
+        return self
+
+
+
+############################################################
+# ARCHIVO: ia-engine/app/models/__init__.py
+############################################################
+
+
+
+
+############################################################
+# ARCHIVO: ia-engine/app/models/response.py
+############################################################
+
+# ia-engine/app/models/response.py
+"""Modelos de response para el motor de IA de emails V2.
+
+A nivel de API hablamos de *sets de contenido*:
+cada elemento de `variants` es un set con:
+- subject
+- preheader
+- body.{title, subtitle, content}
+- cta
+"""
+
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field
+
+
+class BodyBlock(BaseModel):
+    """
+    Bloque de body del correo.
+
+    Coincide con lo que espera el backend Node:
+    body: { title, subtitle, content }
+    """
+
+    title: str = Field(
+        ...,
+        description="Título (H1) dentro del correo.",
+    )
+    subtitle: Optional[str] = Field(
+        default=None,
+        description="Subtítulo o bajada debajo del título.",
+    )
+    content: str = Field(
+        ...,
+        description="Body del correo en texto plano.",
+    )
+
+
+class GeneratedVariant(BaseModel):
+    """
+    Set de contenido de email generado por el motor de IA.
+
+    Estos campos encajan directo con el contrato actual del backend:
+    - id                 → identificador de la variante (1..N).
+    - subject, preheader → se sanitizan en Node.
+    - body               → objeto { title, subtitle, content }.
+    - cta                → CTA corto (2–4 palabras).
+    """
+
+    id: int = Field(
+        ...,
+        description="Identificador de la variante (secuencial, 1..N).",
+    )
+
+    subject: str = Field(
+        ...,
+        description="Asunto del correo.",
+    )
+
+    preheader: str = Field(
+        ...,
+        description="Preheader del correo.",
+    )
+
+    body: BodyBlock = Field(
+        ...,
+        description="Bloque de contenido principal del correo.",
+    )
+
+    cta: Optional[str] = Field(
+        default=None,
+        description="Llamado a la acción (CTA breve).",
+    )
+
+
+class GenerateResponse(BaseModel):
+    """Respuesta estándar del endpoint /ia/generate."""
+
+    engine: str = Field(
+        ...,
+        description="Motor de IA utilizado para la generación.",
+    )
+
+    variants: List[GeneratedVariant] = Field(
+        default_factory=list,
+        description="Lista de sets de contenido generados.",
+    )
+
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Metadatos de la llamada (tokens, duración, mensajes internos, etc.).",
+    )
+
+
+
+############################################################
+# ARCHIVO: ia-engine/app/services/__init__.py
+############################################################
+
+
+
+
+############################################################
+# ARCHIVO: ia-engine/app/services/openai_client.py
+############################################################
+
+# ia-engine/app/services/openai_client.py
+"""Cliente OpenAI de bajo nivel para el IA Engine (Banco BICE).
+
+Responsabilidad:
+- Cargar configuración desde variables de entorno / .env.
+- Crear un cliente OpenAI (soporta OPENAI_BASE_URL para endpoint privado).
+- Exponer chat_json(system, user, **kwargs) que devuelve un dict (JSON parseado).
+- Manejar timeouts y reintentos básicos.
+
+NO conoce de GenerateRequest ni de campañas; eso lo maneja text_engine/prompts.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+from typing import Any, Dict, Optional
+
+try:
+    # En local cargamos .env; en GCP usarás env vars del servicio.
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except Exception:
+    pass
+
+from openai import OpenAI
+
+logger = logging.getLogger(__name__)
+
+# =========================
+# Configuración base
+# =========================
+
+# Modelo por defecto para generación de emails en JSON
+MODEL_JSON = (
+    os.getenv("OPENAI_MODEL_EMAIL")
+    or os.getenv("OPENAI_TEXT_JSON")
+    or "gpt-4o-mini"
+)
+
+# Parámetros de sampling por defecto
+TEMP = float(os.getenv("OPENAI_TEXT_TEMP", "0.6"))
+TOP_P = float(os.getenv("OPENAI_TEXT_TOP_P", "0.9"))
+MAX_TOKENS = int(os.getenv("OPENAI_TEXT_MAX_TOKENS", "900"))
+
+# Timeouts y reintentos
+REQUEST_TIMEOUT = float(os.getenv("OPENAI_REQUEST_TIMEOUT", "30"))  # segundos
+MAX_RETRIES = int(os.getenv("OPENAI_MAX_RETRIES", "2"))
+
+_client: Optional[OpenAI] = None
+
+
+def _get_client() -> OpenAI:
+    """
+    Singleton simple del cliente OpenAI.
+
+    Importante:
+    - NO pasamos 'proxies' en los kwargs porque las versiones nuevas
+      del SDK no aceptan ese argumento en el constructor.
+    - Si en el futuro necesitas proxy, se configura vía HTTP_PROXY / HTTPS_PROXY
+      a nivel de variables de entorno, no en el constructor.
+    """
+    global _client
+    if _client is not None:
+        return _client
+
+    api_key = (
+        os.getenv("OPENAI_API_KEY")
+        or os.getenv("OPENAI_APIKEY")
+        or os.getenv("OPENAI_TOKEN")
+    )
+    if not api_key:
+        raise RuntimeError("IA-Engine: OPENAI_API_KEY no está configurada")
+
+    base_url = (
+        os.getenv("OPENAI_BASE_URL")
+        or os.getenv("OPENAI_API_BASE")
+        or os.getenv("OPENAI_ENDPOINT")
+    )
+
+    # Timeout de cliente (se puede tunear más fino usando httpx custom si algún día hace falta)
+    try:
+        client_timeout = float(os.getenv("OPENAI_CLIENT_TIMEOUT", "60"))
+    except ValueError:
+        client_timeout = 60.0
+
+    kwargs: Dict[str, Any] = {
+        "api_key": api_key,
+        "timeout": client_timeout,
+    }
+
+    if base_url:
+        kwargs["base_url"] = base_url
+
+    # OJO: aquí antes se solía pasar "proxies", eso es lo que rompía en Docker.
+    _client = OpenAI(**kwargs)
+    logger.info("IA-Engine: cliente OpenAI inicializado (model=%s)", MODEL_JSON)
+    return _client
+
+
+def chat_json(
+    system: str,
+    user: str,
+    *,
+    model: Optional[str] = None,
+    temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    timeout: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    Llama a Chat Completions esperando un JSON en el contenido.
+
+    Args:
+        system: mensaje de sistema.
+        user: mensaje de usuario (prompt principal).
+        model: modelo a usar (fallback a MODEL_JSON).
+        temperature, top_p, max_tokens: overrides opcionales.
+        timeout: override opcional de timeout en segundos.
+
+    Returns:
+        dict parseado desde el contenido devuelto por el modelo.
+
+    Raises:
+        RuntimeError si falla tras los reintentos.
+        json.JSONDecodeError si el contenido no es JSON válido.
+    """
+    client = _get_client()
+
+    m = model or MODEL_JSON
+    t = TEMP if temperature is None else float(temperature)
+    p = TOP_P if top_p is None else float(top_p)
+    mt = MAX_TOKENS if max_tokens is None else int(max_tokens)
+    to = REQUEST_TIMEOUT if timeout is None else float(timeout)
+
+    last_err: Optional[Exception] = None
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            logger.debug(
+                "IA-Engine: llamando a OpenAI (model=%s, attempt=%d/%d)",
+                m,
+                attempt,
+                MAX_RETRIES,
+            )
+
+            resp = client.chat.completions.create(
+                model=m,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=t,
+                top_p=p,
+                max_tokens=mt,
+                response_format={"type": "json_object"},
+                timeout=to,
+            )
+
+            if not resp.choices:
+                raise RuntimeError(
+                    "IA-Engine: respuesta sin choices desde OpenAI"
+                )
+
+            content = resp.choices[0].message.content or "{}"
+            try:
+                data = json.loads(content)
+            except json.JSONDecodeError as exc:
+                logger.error("IA-Engine: contenido no es JSON válido: %s", exc)
+                # Logueamos un fragmento del contenido para debug si es muy largo
+                snippet = content[:1000]
+                logger.debug(
+                    "Contenido bruto devuelto por el modelo (truncado a 1000 chars):\n%s",
+                    snippet,
+                )
+                raise
+
+            return data
+
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            logger.warning(
+                "IA-Engine: error llamando a OpenAI (attempt %d/%d): %s",
+                attempt,
+                MAX_RETRIES,
+                exc,
+            )
+            if attempt >= MAX_RETRIES:
+                break
+
+    # Si llegamos acá, fallaron todos los intentos
+    msg = f"IA-Engine: error llamando a OpenAI tras {MAX_RETRIES} intentos"
+    logger.error(msg)
+    raise RuntimeError(msg) from last_err
+
+
+__all__ = ["chat_json", "MODEL_JSON"]
+
+
+
+############################################################
+# ARCHIVO: ia-engine/app/services/text_engine.py
+############################################################
+
+# ia-engine/app/services/text_engine.py
+"""Motor de texto para Emails V2 (Banco BICE).
+
+Genera *sets de contenido* para emails.
+
+Cada set incluye:
+- id
+- subject
+- preheader
+- body.{title, subtitle, content}
+- cta
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import List, Dict, Any
+
+from app.models.request import GenerateRequest
+from app.models.response import GeneratedVariant, BodyBlock
+from app.services.openai_client import chat_json
+from app.utils.validators import soft_validate_campaign_cluster
+from app.utils.prompts import build_email_prompt
+
+logger = logging.getLogger(__name__)
+
+
+def _extract_feedback(req: GenerateRequest) -> Dict[str, str]:
+    """Normaliza feedback opcional desde GenerateRequest para logs/debug."""
+    fb = getattr(req, "feedback", None)
+
+    def _get(attr: str) -> str:
+        if fb is None:
+            return ""
+        if isinstance(fb, dict):
+            return str(fb.get(attr) or "").strip()
+        return str(getattr(fb, attr, "") or "").strip()
+
+    body_hint = _get("bodyContent") or _get("body")
+
+    data = {
+        "subject_hint": _get("subject"),
+        "preheader_hint": _get("preheader"),
+        "body_hint": body_hint,
+    }
+    logger.debug("IA-Engine feedback normalizado: %s", data)
+    return data
+
+
+def _stub_variant(req: GenerateRequest, idx: int) -> GeneratedVariant:
+    """
+    Fallback determinístico si OpenAI falla.
+
+    IMPORTANTE:
+    - No exponemos el feedback bruto (por ejemplo, la URL del héroe).
+    - Dejamos un texto genérico pero utilizable, que el equipo puede editar.
+    """
+    campaign, cluster = soft_validate_campaign_cluster(
+        req.campaign, req.cluster
+    )
+
+    # Solo para logging, no para mostrarle al usuario
+    _extract_feedback(req)
+
+    title = f"{campaign} · {cluster}"
+    subtitle = (
+        "Texto generado automáticamente. Revisa y ajusta antes de enviar."
+    )
+    body_content = (
+        "Contenido generado automáticamente por el IA Engine para Banco BICE.\n\n"
+        f"Campaña: {campaign}\n"
+        f"Cluster: {cluster}\n\n"
+        "Este set se generó como fallback luego de un error con el motor de IA. "
+        "Por favor revisa el texto, completa beneficios, condiciones y llamados "
+        "a la acción según los lineamientos comerciales vigentes."
+    )
+    subject = f"{campaign}: alternativa {idx + 1}"
+    preheader = f"Perfil {cluster} · Set {idx + 1}"
+
+    return GeneratedVariant(
+        id=idx + 1,
+        subject=subject,
+        preheader=preheader,
+        body=BodyBlock(
+            title=title,
+            subtitle=subtitle,
+            content=body_content,
+        ),
+        cta="Conoce más",
+    )
+
+
+def _map_json_to_variant(
+    data: Dict[str, Any],
+    *,
+    campaign: str,
+    cluster: str,
+    index: int,
+) -> GeneratedVariant:
+    """
+    Mapea el dict devuelto por OpenAI al modelo GeneratedVariant.
+
+    Es tolerante a pequeñas variaciones de claves:
+    - body vs content vs bodyContent
+    - subtitle vs bajada vs subheading
+    """
+    subject = str(data.get("subject", "")).strip()
+    preheader = str(data.get("preheader", "")).strip()
+    title = str(data.get("title", "")).strip()
+
+    subtitle_raw = (
+        data.get("subtitle")
+        or data.get("bajada")
+        or data.get("subheading")
+    )
+
+    body = str(
+        data.get("body")
+        or data.get("content")
+        or data.get("bodyContent")
+        or ""
+    ).strip()
+
+    cta_raw = data.get("cta")
+
+    subtitle = None
+    if subtitle_raw is not None:
+        s = str(subtitle_raw).strip()
+        subtitle = s or None
+
+    # Si no viene subtítulo pero sí body, usamos la primera línea como bajada
+    if subtitle is None and body:
+        first_line = body.split("\n", 1)[0].strip()
+        if len(first_line) > 160:
+            first_line = first_line[:157] + "..."
+        subtitle = first_line or None
+
+    cta = None
+    if isinstance(cta_raw, str) and cta_raw.strip():
+        cta = cta_raw.strip()
+
+    if not subject and not preheader and not body:
+        raise ValueError(
+            "Respuesta de OpenAI vacía (sin subject, preheader ni body)."
+        )
+
+    if not title:
+        title = f"{campaign} · {cluster}"
+
+    return GeneratedVariant(
+        id=index + 1,
+        subject=subject,
+        preheader=preheader,
+        body=BodyBlock(
+            title=title,
+            subtitle=subtitle,
+            content=body,
+        ),
+        cta=cta,
+    )
+
+
+def _clamp_sets(n: int) -> int:
+    """
+    Limita la cantidad de sets permitidos.
+
+    Regla actual de negocio: 1..5 sets.
+    """
+    try:
+        value = int(n)
+    except (TypeError, ValueError):
+        value = 1
+
+    if value < 1:
+        return 1
+    if value > 5:
+        return 5
+    return value
+
+
+def generate_sets(request: GenerateRequest) -> List[GeneratedVariant]:
+    """
+    Genera N *sets de contenido* para un email
+    (subject, preheader, title, subtitle, body, cta).
+
+    Usa OpenAI como motor principal y cae al stub si algo falla
+    a nivel de cada variante.
+    """
+    # Normalizamos campaña/cluster (warnings suaves si algo no cuadra)
+    campaign, cluster = soft_validate_campaign_cluster(
+        request.campaign, request.cluster
+    )
+    request.campaign = campaign
+    request.cluster = cluster
+
+    # Número de sets (clamp 1..5)
+    total_sets = _clamp_sets(getattr(request, "sets", 1) or 1)
+    variants: List[GeneratedVariant] = []
+
+    logger.info(
+        "IA-Engine: generando %d sets de contenido (campaign=%s, cluster=%s)",
+        total_sets,
+        campaign,
+        cluster,
+    )
+
+    for i in range(total_sets):
+        try:
+            # 1) Construir prompt específico para este set
+            system, user = build_email_prompt(
+                campaign=request.campaign,
+                cluster=request.cluster,
+                feedback=request.feedback,
+                variant_index=i + 1,
+            )
+
+            # 2) Llamar a OpenAI en modo JSON
+            data = chat_json(system, user)
+
+            # 3) Mapear al modelo tipado
+            variant = _map_json_to_variant(
+                data,
+                campaign=request.campaign,
+                cluster=request.cluster,
+                index=i,
+            )
+            variants.append(variant)
+
+        except Exception as exc:  # noqa: BLE001
+            # No rompemos todo el batch; dejamos rastro y usamos stub.
+            logger.exception(
+                "IA-Engine: error generando set %d, uso stub: %s",
+                i + 1,
+                exc,
+            )
+            variants.append(_stub_variant(request, i))
+
+    logger.info(
+        "IA-Engine: generados %d sets (incluyendo stubs si hubo errores).",
+        len(variants),
+    )
+    return variants
+
+
+# Alias más explícito para el resto de la app / futuro refactor
+def generate_email_sets(request: GenerateRequest) -> List[GeneratedVariant]:
+    """
+    Wrapper semántico sobre generate_sets, pensado para uso externo.
+    """
+    return generate_sets(request)
+
+
+__all__ = ["generate_sets", "generate_email_sets"]
+
+

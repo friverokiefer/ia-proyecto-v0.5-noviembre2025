@@ -1,0 +1,25 @@
+# Carpetas de control / VCS
+.git
+.gitignore
+
+# Entornos locales
+.venv
+.env
+.env.local
+poetry.lock
+
+# Cachés de Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Archivos de IDE / sistema
+.vscode
+.idea
+.DS_Store
+
+# Logs
+*.log
+
+# Otros que no aportan al build
+Dockerfile

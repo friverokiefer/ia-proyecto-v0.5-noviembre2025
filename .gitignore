@@ -1,0 +1,139 @@
+# ========================================
+# 1. REGLAS GLOBALES (Node, Python, OS)
+# ========================================
+
+# Dependencias de Node (en raíz, frontend y backend)
+node_modules/
+
+# Builds y distribuciones (se reconstruyen con build / docker)
+dist/
+build/
+out/
+
+# Logs generales
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Archivos de sistema operativo
+.DS_Store
+Thumbs.db
+.Desktop
+.Spotlight-V100
+.Trashes
+
+# IDEs y editores
+.vscode/
+.idea/
+*.swp
+*.swo
+*.code-workspace
+.history/
+
+
+# ========================================
+# 2. VARIABLES DE ENTORNO Y SECRETOS
+# ========================================
+
+# Ignorar todos los .env reales, pero mantener los ejemplos
+.env
+.env.local
+.env.*.local
+.env.*
+!.env.example
+!.env.*.example
+
+# Certificados y llaves globales
+*.pem
+*.p12
+*.key
+*.jks
+
+# BACKEND: secretos (solo se versionan ejemplos y .gitkeep)
+backend/.secrets/*
+!backend/.secrets/.gitkeep
+!backend/.secrets/*example*.json
+
+backend/keys/*
+!backend/keys/.gitkeep
+!backend/keys/*example*.json
+
+# IA-ENGINE: secretos (solo ejemplos / .gitkeep)
+ia-engine/.secrets/*
+!ia-engine/.secrets/.gitkeep
+!ia-engine/.secrets/*example*.json
+
+ia-engine/keys/*
+!ia-engine/keys/.gitkeep
+!ia-engine/keys/*example*.json
+
+
+# ========================================
+# 3. FRONTEND (React + Vite)
+# ========================================
+
+# Cachés de Vite y testing
+.vite/
+coverage/
+
+# Archivos locales de configuración
+frontend/.eslintcache
+frontend/*.local
+
+
+# ========================================
+# 4. BACKEND (Node.js)
+# ========================================
+
+# Generados automáticamente (se pueden recrear con build)
+backend/src/public/generated/
+backend/tmp/
+
+
+# ========================================
+# 5. IA-ENGINE (Python)
+# ========================================
+
+# Entornos virtuales (nombres comunes)
+ia-engine/.venv/
+ia-engine/venv/
+ia-engine/env/
+.venv/
+venv/
+
+# Bytecode y cachés de Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Herramientas de análisis y testing
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+
+# ========================================
+# 6. GESTORES DE PAQUETES (Lockfiles)
+# ========================================
+# Se ignoran lockfiles (raíz y subcarpetas)
+
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Cachés de gestores
+.npm/
+.cache/
+.v8-compile-cache/
+
+
+# ========================================
+# 7. OTROS
+# ========================================
+
+# Ignora script con credenciales locales
+masterkey.py
