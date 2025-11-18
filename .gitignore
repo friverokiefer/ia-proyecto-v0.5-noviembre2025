@@ -119,11 +119,7 @@ htmlcov/
 # ========================================
 # 6. GESTORES DE PAQUETES (Lockfiles)
 # ========================================
-# Se ignoran lockfiles (raíz y subcarpetas)
-
-package-lock.json
-yarn.lock
-pnpm-lock.yaml
+# No ignoramos lockfiles (se versionan para npm ci / futuras herramientas)
 
 # Cachés de gestores
 .npm/
@@ -135,5 +131,6 @@ pnpm-lock.yaml
 # 7. OTROS
 # ========================================
 
-# Ignora script con credenciales locales
-masterkey.py
+# Config local del masterkey (no se versiona)
+masterkey.local.*
+masterkey.local.json
